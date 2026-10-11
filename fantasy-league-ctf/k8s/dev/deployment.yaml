@@ -1,0 +1,48 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fantasy-league
+  namespace: fantasy-league-dev
+  labels:
+    app: fantasy-league
+    environment: dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fantasy-league
+  template:
+    metadata:
+      labels:
+        app: fantasy-league
+        environment: dev
+    spec:
+      containers:
+        - name: fantasy-league
+          image: localhost:32000/fantasy-league:latest
+          ports:
+            - containerPort: 80
+          env:
+            - name: FLAG_CSP
+              value: "MCSEH{csp_1s_n0t_s0_s3cur3_4ft3r_all}"
+            - name: FLAG_IDOR
+              value: "MCSEH{1d0r_ch4mp10n_l34gu3_h4ck3r}"
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "150m"
+              memory: "128Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fantasy-league
+  namespace: fantasy-league-dev
+spec:
+  selector:
+    app: fantasy-league
+  ports:
+    - port: 80
+      targetPort: 80

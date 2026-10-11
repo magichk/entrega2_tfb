@@ -1,0 +1,24 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: fantasy-league
+  namespace: fantasy-league
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - fantasyleague-lab.magichk.es
+      secretName: fantasy-league-tls
+  rules:
+    - host: fantasyleague-lab.magichk.es
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fantasy-league
+                port:
+                  number: 80

@@ -1,0 +1,99 @@
+stages:
+  - secrets-scan
+  - sast
+  - dependency-scan
+  - manifest-lint
+  - policy-check
+  - build
+  - incident-report
+
+secrets-scan:
+  stage: secrets-scan
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . --no-git -v
+  allow_failure: false
+
+sast:
+  stage: sast
+  image: semgrep/semgrep:latest
+  script:
+    - semgrep scan --config auto --error .
+  allow_failure: true
+
+dependency-scan:
+  stage: dependency-scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy fs --exit-code 0 --severity LOW,MEDIUM,HIGH,CRITICAL --scanners vuln,misconfig,secret .
+    - trivy fs --exit-code 1 --severity CRITICAL --scanners vuln,misconfig,secret .
+  allow_failure: false
+
+manifest-lint:
+  stage: manifest-lint
+  image: alpine:latest
+  script:
+    - apk add --no-cache curl
+    - curl -sL https://github.com/stackrox/kube-linter/releases/latest/download/kube-linter-linux.tar.gz -o kl.tar.gz
+    - tar xzf kl.tar.gz
+    - ./kube-linter lint k8s/deployment.yaml
+  allow_failure: true
+
+policy-check:
+  stage: policy-check
+  image: alpine:latest
+  script:
+    - apk add --no-cache curl jq
+    - 'VERSION=$(curl -s https://api.github.com/repos/kyverno/kyverno/releases/latest | jq -r .tag_name)'
+    - curl -sL "https://github.com/kyverno/kyverno/releases/download/${VERSION}/kyverno-cli_${VERSION}_linux_x86_64.tar.gz" -o kv.tar.gz
+    - tar xzf kv.tar.gz
+    - ./kyverno apply policy.yaml --resource k8s/deployment.yaml
+  allow_failure: false
+
+build:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - /kaniko/executor --context "${CI_PROJECT_DIR}" --dockerfile "${CI_PROJECT_DIR}/Dockerfile" --no-push
+  allow_failure: true
+
+security-incident-report:
+  stage: incident-report
+  image: alpine:latest
+  script:
+    - apk add --no-cache curl jq
+    - |
+      FAILED_JOBS=$(curl -s --header "PRIVATE-TOKEN: ${SECURITY_INCIDENTS_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs?scope[]=failed" \
+        | jq -r '[.[].name] | join(", ")')
+      if [ -z "$FAILED_JOBS" ]; then
+        echo "No failed jobs found for this pipeline, skipping."
+        exit 0
+      fi
+      SEVERITY="severity::high"
+      case "$FAILED_JOBS" in
+        *secrets-scan*) SEVERITY="severity::critical" ;;
+      esac
+      TITLE="[Gate] ${CI_PROJECT_NAME} #${CI_PIPELINE_ID} bloqueado: ${FAILED_JOBS}"
+      DESCRIPTION="**Pipeline bloqueado por el Gate de seguridad.**
+
+      - Proyecto: ${CI_PROJECT_NAME}
+      - Pipeline: ${CI_PIPELINE_URL}
+      - Commit: ${CI_COMMIT_SHORT_SHA} (${CI_COMMIT_REF_NAME})
+      - Jobs fallidos: ${FAILED_JOBS}
+
+      Revisar el log de cada job fallido en el pipeline enlazado arriba antes de cerrar este ticket."
+      curl -s -o /dev/null -w "create_issue: %{http_code}\n" \
+        --header "PRIVATE-TOKEN: ${SECURITY_INCIDENTS_TOKEN}" -X POST \
+        --data-urlencode "title=${TITLE}" \
+        --data-urlencode "description=${DESCRIPTION}" \
+        --data-urlencode "labels=source::pipeline-gate,${SEVERITY}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues"
+  when: on_failure
+  allow_failure: true

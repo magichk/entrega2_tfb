@@ -1,0 +1,41 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fantasy-league-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://coderepo-lab.magichk.es/jamartin/fantasy-league-ctf.git
+    targetRevision: dev
+    path: k8s/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fantasy-league-dev
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fantasy-league-qa
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://coderepo-lab.magichk.es/jamartin/fantasy-league-ctf.git
+    targetRevision: qa
+    path: k8s/qa
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: fantasy-league-qa
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true

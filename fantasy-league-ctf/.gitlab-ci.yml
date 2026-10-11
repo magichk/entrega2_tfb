@@ -1,0 +1,164 @@
+stages:
+  - secrets-scan
+  - sast
+  - dependency-scan
+  - manifest-lint
+  - policy-check
+  - build
+  - update-manifest
+  - dast
+  - incident-report
+
+.resolve_env: &resolve_env |
+  case "$CI_COMMIT_REF_NAME" in
+    main) K8S_DIR="k8s"; NAMESPACE="fantasy-league"; ENV_LABEL="env::prod" ;;
+    qa) K8S_DIR="k8s/qa"; NAMESPACE="fantasy-league-qa"; ENV_LABEL="env::qa" ;;
+    dev) K8S_DIR="k8s/dev"; NAMESPACE="fantasy-league-dev"; ENV_LABEL="env::dev" ;;
+    *) K8S_DIR="k8s"; NAMESPACE="fantasy-league"; ENV_LABEL="env::platform" ;;
+  esac
+
+secrets-scan:
+  stage: secrets-scan
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . --no-git -v
+  allow_failure: true
+
+sast:
+  stage: sast
+  image: semgrep/semgrep:latest
+  script:
+    - semgrep scan --config auto --error .
+  allow_failure: true
+
+dependency-scan:
+  stage: dependency-scan
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy fs --exit-code 0 --severity LOW,MEDIUM,HIGH,CRITICAL --scanners vuln,misconfig,secret .
+    - trivy fs --exit-code 1 --severity CRITICAL --scanners vuln,misconfig,secret .
+  allow_failure: false
+
+manifest-lint:
+  stage: manifest-lint
+  image: alpine:latest
+  script:
+    - *resolve_env
+    - echo "Validando manifiestos de la rama '${CI_COMMIT_REF_NAME}' -> ${K8S_DIR}/deployment.yaml"
+    - apk add --no-cache curl
+    - curl -sL https://github.com/stackrox/kube-linter/releases/latest/download/kube-linter-linux.tar.gz -o kl.tar.gz
+    - tar xzf kl.tar.gz
+    - ./kube-linter lint "${K8S_DIR}/deployment.yaml"
+  allow_failure: true
+
+policy-check:
+  stage: policy-check
+  image: alpine:latest
+  script:
+    - *resolve_env
+    - echo "Validando politica Kyverno de la rama '${CI_COMMIT_REF_NAME}' -> ${K8S_DIR}/deployment.yaml"
+    - apk add --no-cache curl jq
+    - 'VERSION=$(curl -s https://api.github.com/repos/kyverno/kyverno/releases/latest | jq -r .tag_name)'
+    - curl -sL "https://github.com/kyverno/kyverno/releases/download/${VERSION}/kyverno-cli_${VERSION}_linux_x86_64.tar.gz" -o kv.tar.gz
+    - tar xzf kv.tar.gz
+    - ./kyverno apply policy.yaml --resource "${K8S_DIR}/deployment.yaml"
+  allow_failure: false
+
+build:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:debug
+    entrypoint: [""]
+  script:
+    - export IMAGE_TAG="${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    - echo "IMAGE_TAG=${IMAGE_TAG}" > build.env
+    - mkdir -p /kaniko/.docker
+    - echo "{\"insecure-registries\":[\"registry.container-registry.svc.cluster.local:5000\"]}" > /kaniko/.docker/config.json
+    - /kaniko/executor --context "${CI_PROJECT_DIR}" --dockerfile "${CI_PROJECT_DIR}/Dockerfile"
+      --destination "registry.container-registry.svc.cluster.local:5000/fantasy-league:${IMAGE_TAG}"
+      --insecure --skip-tls-verify
+  artifacts:
+    reports:
+      dotenv: build.env
+  allow_failure: false
+
+update-manifest:
+  stage: update-manifest
+  image: alpine:latest
+  needs:
+    - build
+  script:
+    - *resolve_env
+    - apk add --no-cache curl jq
+    - echo "Actualizando ${K8S_DIR}/deployment.yaml -> imagen localhost:32000/fantasy-league:${IMAGE_TAG}"
+    - |
+      ENCODED_PATH=$(echo -n "${K8S_DIR}/deployment.yaml" | sed 's:/:%2F:g')
+      curl -s --header "PRIVATE-TOKEN: ${SECURITY_INCIDENTS_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/files/${ENCODED_PATH}/raw?ref=${CI_COMMIT_REF_NAME}" > /tmp/current.yaml
+      sed "s|image: localhost:32000/fantasy-league:.*|image: localhost:32000/fantasy-league:${IMAGE_TAG}|" /tmp/current.yaml > /tmp/new.yaml
+      jq -Rs --arg branch "${CI_COMMIT_REF_NAME}" --arg msg "chore: actualizar imagen a ${IMAGE_TAG} [skip ci]" \
+        '{branch: $branch, content: ., commit_message: $msg}' /tmp/new.yaml > /tmp/payload.json
+      CODE=$(curl -s -o /tmp/resp.json -w '%{http_code}' --header "PRIVATE-TOKEN: ${SECURITY_INCIDENTS_TOKEN}" \
+        --header "Content-Type: application/json" -X PUT \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/repository/files/${ENCODED_PATH}" \
+        -d @/tmp/payload.json)
+      echo "update_manifest: ${CODE}"
+      cat /tmp/resp.json
+  allow_failure: false
+
+dast:
+  stage: dast
+  image:
+    name: zaproxy/zap-stable:latest
+    entrypoint: [""]
+  script:
+    - *resolve_env
+    - echo "Ejecutando ZAP contra ${NAMESPACE}"
+    - mkdir -p /zap/wrk
+    - zap-baseline.py -t "http://fantasy-league.${NAMESPACE}.svc.cluster.local" -r zap-report.html -I || true
+  artifacts:
+    paths:
+      - zap-report.html
+    when: always
+  allow_failure: true
+
+security-incident-report:
+  stage: incident-report
+  image: alpine:latest
+  script:
+    - *resolve_env
+    - apk add --no-cache curl jq
+    - |
+      FAILED_JOBS=$(curl -s --header "PRIVATE-TOKEN: ${SECURITY_INCIDENTS_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/pipelines/${CI_PIPELINE_ID}/jobs?scope[]=failed" \
+        | jq -r '[.[].name] | join(", ")')
+      if [ -z "$FAILED_JOBS" ]; then
+        echo "No failed jobs found for this pipeline, skipping."
+        exit 0
+      fi
+      SEVERITY="severity::high"
+      case "$FAILED_JOBS" in
+        *secrets-scan*) SEVERITY="severity::critical" ;;
+      esac
+      TITLE="[Gate] ${CI_PROJECT_NAME} #${CI_PIPELINE_ID} bloqueado: ${FAILED_JOBS}"
+      DESCRIPTION="**Pipeline bloqueado por el Gate de seguridad.**
+
+      - Proyecto: ${CI_PROJECT_NAME}
+      - Entorno: ${ENV_LABEL}
+      - Pipeline: ${CI_PIPELINE_URL}
+      - Commit: ${CI_COMMIT_SHORT_SHA} (${CI_COMMIT_REF_NAME})
+      - Jobs fallidos: ${FAILED_JOBS}
+
+      Revisar el log de cada job fallido en el pipeline enlazado arriba antes de cerrar este ticket."
+      curl -s -o /dev/null -w "create_issue: %{http_code}\n" \
+        --header "PRIVATE-TOKEN: ${SECURITY_INCIDENTS_TOKEN}" -X POST \
+        --data-urlencode "title=${TITLE}" \
+        --data-urlencode "description=${DESCRIPTION}" \
+        --data-urlencode "labels=source::pipeline-gate,${SEVERITY},${ENV_LABEL}" \
+        "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/issues"
+  when: on_failure
+  allow_failure: true

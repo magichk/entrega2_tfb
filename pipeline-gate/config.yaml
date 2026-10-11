@@ -1,0 +1,8 @@
+# Configuracion de ejemplo de la app (contiene un secreto simulado a proposito
+# para el caso de uso "deteccion de secreto filtrado" del TFM, seccion 5.4.1)
+app:
+  name: microk8s-security-lab
+  environment: staging
+aws:
+  access_key_id: "${AWS_ACCESS_KEY_ID}"
+  secret_access_key: "${AWS_SECRET_ACCESS_KEY}"

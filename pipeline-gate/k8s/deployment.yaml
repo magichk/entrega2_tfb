@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: microk8s-security-lab
+  labels:
+    app: microk8s-security-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: microk8s-security-lab
+  template:
+    metadata:
+      labels:
+        app: microk8s-security-lab
+    spec:
+      containers:
+        - name: app
+          image: alpine:3.20.3
+          securityContext:
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "32Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
